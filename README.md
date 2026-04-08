@@ -23,11 +23,11 @@ Operational values are not hardcoded. The admin portal controls:
 
 ## Workspaces
 
-- [backend](D:\helmet-helzion\backend)
-- [web](D:\helmet-helzion\web)
-- [mobile](D:\helmet-helzion\mobile)
-- [firmware](D:\helmet-helzion\firmware)
-- [docs](D:\helmet-helzion\docs)
+- backend
+- web
+- mobile
+- firmware
+- docs
 
 ## Status
 
