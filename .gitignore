@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.idea/
+.vscode/
+.env
+.env.*
+coverage/
+*.log
+backend/uploads/
+mobile/build/
+web/dist/
+.DS_Store

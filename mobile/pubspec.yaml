@@ -1,0 +1,18 @@
+name: smart_helmet_mobile
+description: Smart Helmet mobile application
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.1.2
+  http: ^1.2.2
+  google_maps_flutter: ^2.9.0
+  local_auth: ^2.3.0
+
+flutter:
+  uses-material-design: true
