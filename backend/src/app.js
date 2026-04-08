@@ -22,6 +22,16 @@ export const createApp = () => {
 
   app.use("/uploads", express.static(path.resolve(process.cwd(), "uploads")));
 
+  app.get("/", (_req, res) => {
+    res.json({
+      ok: true,
+      service: "smart-helmet-backend",
+      status: "running",
+      health: "/health",
+      api: "/api"
+    });
+  });
+
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "smart-helmet-backend" });
   });
