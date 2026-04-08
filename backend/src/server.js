@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { createApp } from "./app.js";
 import { createRealtimeServer } from "./services/realtime.service.js";
+import { bootstrapDefaultAdmin } from "./services/bootstrap.service.js";
 import { seedDefaultSettings } from "./services/settings.service.js";
 
 dotenv.config();
@@ -25,6 +26,7 @@ if (!mongoUri) {
 
 await mongoose.connect(mongoUri);
 await seedDefaultSettings();
+await bootstrapDefaultAdmin();
 
 const app = createApp();
 const server = createRealtimeServer(app);
