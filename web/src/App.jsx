@@ -19,6 +19,22 @@ import {
   UserProfilePage
 } from "./dashboard-pages";
 
+const THEME_KEY = "smartHelmetTheme";
+const themeColors = {
+  dark: {
+    background: "#07111f",
+    panel: "#0d1a2d",
+    panelSoft: "#13233a",
+    text: "#eaf2ff"
+  },
+  light: {
+    background: "#f4f8ff",
+    panel: "#ffffff",
+    panelSoft: "#eef4ff",
+    text: "#10213f"
+  }
+};
+
 const publicNav = [["Home", "/"], ["Features", "/features"], ["How It Works", "/how-it-works"], ["About", "/about"], ["Contact", "/contact"]];
 const defaults = {
   homepageContent: {
@@ -37,7 +53,7 @@ const defaults = {
     email2: "sales@smarthelmet.com",
     phone1: "+92 300 1234567",
     phone2: "+92 321 7654321",
-    address: "Karachi, Pakistan",
+    address: "",
     copyrights: "Copyright 2026 SmartHelmet. All rights reserved."
   },
   maintenance: { enabled: false, visitorMessage: "Website under maintenance" }
@@ -52,6 +68,18 @@ const getStoredSession = () => {
   } catch {
     return null;
   }
+};
+
+const getStoredTheme = () => localStorage.getItem(THEME_KEY) || "light";
+const applyTheme = (theme) => {
+  const nextTheme = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = nextTheme;
+  document.documentElement.style.setProperty("--app-bg", themeColors[nextTheme].background);
+  document.documentElement.style.setProperty("--app-panel", themeColors[nextTheme].panel);
+  document.documentElement.style.setProperty("--app-panel-soft", themeColors[nextTheme].panelSoft);
+  document.documentElement.style.setProperty("--app-text", themeColors[nextTheme].text);
+  localStorage.setItem(THEME_KEY, nextTheme);
+  return nextTheme;
 };
 
 const storeSession = (session) => localStorage.setItem("smartHelmetSession", JSON.stringify(session));
@@ -72,9 +100,37 @@ const useSession = () => {
   };
 };
 
+const useThemeMode = () => {
+  const [theme, setTheme] = useState(() => {
+    const initial = getStoredTheme();
+    return applyTheme(initial);
+  });
+
+  useEffect(() => {
+    const sync = () => setTheme(applyTheme(getStoredTheme()));
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
+
+  const toggleTheme = () => {
+    setTheme((current) => applyTheme(current === "dark" ? "light" : "dark"));
+  };
+
+  return { theme, toggleTheme };
+};
+
 const Icon = ({ children, tone = "blue" }) => <span className={`icon-badge ${tone}`}>{children}</span>;
 const SectionHeading = ({ title, text }) => <div className="section-heading"><h2>{title}</h2><p>{text}</p></div>;
 const FormStatus = ({ status }) => status?.text ? <div className={`form-status ${status.type}`}>{status.text}</div> : null;
+const LogoMark = ({ compact = false }) => <img className={compact ? "brand-logo compact" : "brand-logo"} src="/logo.png" alt="Helzion logo" />;
+const ThemeToggle = () => {
+  const { theme, toggleTheme } = useThemeMode();
+  return (
+    <button type="button" className="theme-toggle" onClick={toggleTheme} aria-label="Toggle dark mode">
+      <span>{theme === "dark" ? "Light" : "Dark"}</span>
+    </button>
+  );
+};
 
 const usePublicSite = () => {
   const [site, setSite] = useState(defaults);
@@ -110,9 +166,9 @@ const SiteHeader = ({ site = defaults }) => (
     <div className="topbar" />
     {site?.maintenance?.enabled ? <div className="maintenance-strip">{site.maintenance.visitorMessage}</div> : null}
     <header className="site-header">
-      <Link className="brand" to="/">{site?.branding?.headerLogoText || site?.branding?.siteName || "SmartHelmet"}</Link>
+      <Link className="brand" to="/"><LogoMark compact /><span>{site?.branding?.headerLogoText || site?.branding?.siteName || "Helzion"}</span></Link>
       <nav className="site-nav">{publicNav.map(([label, href]) => <Link key={href} to={href}>{label}</Link>)}</nav>
-      <div className="site-actions"><Link to="/login">Login</Link><Link className="cta-pill" to="/register">Register</Link></div>
+      <div className="site-actions"><ThemeToggle /><Link to="/login">Login</Link><Link className="cta-pill" to="/register">Register</Link></div>
     </header>
   </>
 );
@@ -123,7 +179,7 @@ const Footer = ({ site = defaults }) => (
       <div><h3>{site?.branding?.footerLogoText || site?.branding?.siteName || "SmartHelmet"}</h3><p>AI-powered smart helmet technology protecting riders with automatic accident detection and emergency response.</p></div>
       <div><h4>Quick Links</h4>{publicNav.map(([label, href]) => <Link key={href} to={href}>{label}</Link>)}</div>
       <div><h4>Legal</h4><a href="/">Privacy Policy</a><a href="/">Terms & Conditions</a><a href="/">Return Policy</a><a href="/">Warranty</a></div>
-      <div><h4>Contact Info</h4><p>{site?.configuration?.email1 || "support@smarthelmet.com"}</p><p>{site?.configuration?.phone1 || "+92 300 1234567"}</p><p>{site?.configuration?.address || "Karachi, Pakistan"}</p></div>
+      <div><h4>Contact Info</h4><p>{site?.configuration?.email1 || "support@smarthelmet.com"}</p><p>{site?.configuration?.phone1 || "+92 300 1234567"}</p><p>{site?.configuration?.address || ""}</p></div>
     </div>
     <div className="footer-bottom">{site?.configuration?.copyrights || defaults.configuration.copyrights}</div>
   </footer>
@@ -248,7 +304,7 @@ const ContactPage = () => {
       <SiteHeader site={site} />
       <PageHero title="Get In Touch" text="Have questions about SmartHelmet? We're here to help. Reach out to us and we'll respond as soon as possible." />
       <section className="section contact-layout">
-        <div className="contact-side">{[["Phone", `${site.configuration.phone1 || ""}\n${site.configuration.phone2 || ""}`.trim()], ["Email", `${site.configuration.email1 || ""}\n${site.configuration.email2 || ""}`.trim()], ["Address", site.configuration.address || "Karachi, Pakistan"], ["Business Hours", "Monday - Friday: 9:00 AM - 6:00 PM\nSaturday: 10:00 AM - 4:00 PM\nSunday: Closed"]].map(([title, text]) => <article key={title} className="info-card"><Icon>{title.slice(0, 2).toUpperCase()}</Icon><h3>{title}</h3>{String(text).split("\n").filter(Boolean).map((line) => <p key={line}>{line}</p>)}</article>)}</div>
+        <div className="contact-side">{[["Phone", `${site.configuration.phone1 || ""}\n${site.configuration.phone2 || ""}`.trim()], ["Email", `${site.configuration.email1 || ""}\n${site.configuration.email2 || ""}`.trim()], ["Address", site.configuration.address || ""], ["Business Hours", "Monday - Friday: 9:00 AM - 6:00 PM\nSaturday: 10:00 AM - 4:00 PM\nSunday: Closed"]].map(([title, text]) => <article key={title} className="info-card"><Icon>{title.slice(0, 2).toUpperCase()}</Icon><h3>{title}</h3>{String(text).split("\n").filter(Boolean).map((line) => <p key={line}>{line}</p>)}</article>)}</div>
         <form className="contact-form-card" onSubmit={onSubmit}>
           <h2>Send Us a Message</h2>
           <p>Fill out the form below and we'll get back to you within 24 hours.</p>
@@ -263,7 +319,7 @@ const ContactPage = () => {
           <button className="btn primary full-btn" disabled={submitting}>{submitting ? "Sending..." : "Send Message"}</button>
         </form>
       </section>
-      <section className="map-placeholder">Map View<br /><small>{site.configuration.address || "Karachi, Pakistan"}</small></section>
+      <section className="map-placeholder">Map View<br /><small>{site.configuration.address || ""}</small></section>
       <Footer site={site} />
     </>
   );
@@ -275,6 +331,7 @@ const LoginPage = ({ saveSession }) => {
   const [status, setStatus] = useState({ type: "", text: "" });
   const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
+  const site = usePublicSite();
 
   const onChange = (event) => setForm((current) => ({ ...current, [event.target.name]: event.target.value }));
   const onSubmit = async (event) => {
@@ -294,9 +351,15 @@ const LoginPage = ({ saveSession }) => {
 
   return (
     <>
-      <SiteHeader site={usePublicSite()} />
+      <SiteHeader site={site} />
       <section className="auth-shell">
-        <div className="auth-promo"><h2>SmartHelmet</h2><h3>Welcome Back!</h3><p>Sign in to access your dashboard and monitor your smart helmet in real-time.</p><ul><li>Real-Time Monitoring</li><li>Emergency Contacts</li><li>Accident History</li></ul></div>
+        <div className="auth-promo">
+          <LogoMark />
+          <h2>Helzion</h2>
+          <h3>Welcome Back!</h3>
+          <p>Sign in to access your live dashboard and monitor your smart helmet in real time.</p>
+          <ul><li>Real-Time Monitoring</li><li>Emergency Contacts</li><li>Accident History</li></ul>
+        </div>
         <form className="auth-card" onSubmit={onSubmit}>
           <div className="mode-tabs"><button type="button" className={mode === "user" ? "tab active" : "tab"} onClick={() => setMode("user")}>User</button><button type="button" className={mode === "admin" ? "tab active" : "tab"} onClick={() => setMode("admin")}>Admin</button></div>
           <h1>Sign In</h1>
@@ -309,7 +372,7 @@ const LoginPage = ({ saveSession }) => {
           <div className="row-between auth-meta"><label className="check"><input type="checkbox" /> Remember me</label><Link to="/forgot-password">Forgot password?</Link></div>
           <button className="btn primary full-btn" disabled={submitting}>{submitting ? "Signing In..." : "Sign In"}</button>
           <p className="auth-switch">Don't have an account? <Link to="/register">Register now</Link></p>
-          <div className="demo-note">Admin access is controlled from the backend and can be managed later from the admin portal.</div>
+          <div className="demo-note">All authentication is handled by the live backend at helzion-server.onrender.com.</div>
         </form>
       </section>
     </>
@@ -424,5 +487,6 @@ const AppRoutes = () => {
 };
 
 export default function App() {
+  useThemeMode();
   return <AppRoutes />;
 }

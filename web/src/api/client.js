@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "https://helzion-server.onrender.com/api";
 export const WS_BASE = import.meta.env.VITE_WS_BASE_URL || API_BASE.replace(/\/api\/?$/, "").replace(/^http/, "ws");
 
 async function request(path, options = {}) {

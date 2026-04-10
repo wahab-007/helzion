@@ -1,4 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const SmartHelmetApp());
@@ -6,33 +11,88 @@ void main() {
 
 const _brandBlue = Color(0xFF2D28D7);
 const _brandRed = Color(0xFFFF2D3D);
-const _pageBackground = Color(0xFFF7F8FC);
 const _cardShadow = BoxShadow(
   color: Color(0x120F172A),
   blurRadius: 20,
   offset: Offset(0, 10),
 );
 
-class SmartHelmetApp extends StatelessWidget {
+class SmartHelmetApp extends StatefulWidget {
   const SmartHelmetApp({super.key});
+
+  @override
+  State<SmartHelmetApp> createState() => _SmartHelmetAppState();
+}
+
+class _SmartHelmetAppState extends State<SmartHelmetApp> {
+  bool _darkMode = false;
+  bool _loading = true;
+  bool _startupPermissionsPromptSeen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPrefs();
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _darkMode = prefs.getBool('smartHelmet.darkMode') ?? false;
+      _startupPermissionsPromptSeen = prefs.getBool('smartHelmet.permissionsPromptSeen') ?? false;
+      _loading = false;
+    });
+  }
+
+  Future<void> _setDarkMode(bool enabled) async {
+    setState(() => _darkMode = enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('smartHelmet.darkMode', enabled);
+  }
+
+  Future<void> _setPermissionsPromptSeen() async {
+    setState(() => _startupPermissionsPromptSeen = true);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('smartHelmet.permissionsPromptSeen', true);
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Smart Helmet',
+      themeMode: _darkMode ? ThemeMode.dark : ThemeMode.light,
       theme: ThemeData(
         useMaterial3: true,
-        scaffoldBackgroundColor: _pageBackground,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: _brandBlue,
-          primary: _brandBlue,
-          secondary: _brandRed,
-          surface: Colors.white,
+        brightness: Brightness.light,
+        scaffoldBackgroundColor: const Color(0xFFF4F8FF),
+        colorScheme: const ColorScheme.light(
+          primary: Color(0xFF2D28D7),
+          secondary: Color(0xFFFF5A76),
+          surface: Color(0xFFFFFFFF),
         ),
         fontFamily: 'Roboto',
       ),
-      home: const AppController(),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF07111F),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF4F8EFF),
+          secondary: Color(0xFFFF5A76),
+          surface: Color(0xFF0D1A2D),
+        ),
+        fontFamily: 'Roboto',
+      ),
+      home: _loading
+          ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+          : AppController(
+              initialDarkMode: _darkMode,
+              permissionsPromptSeen: _startupPermissionsPromptSeen,
+              onDarkModeChanged: _setDarkMode,
+              onPermissionsPromptSeen: _setPermissionsPromptSeen,
+            ),
     );
   }
 }
@@ -117,6 +177,16 @@ class AppSettingsData {
   }
 }
 
+class AppPermissionState {
+  const AppPermissionState({
+    required this.notificationsGranted,
+    required this.locationGranted,
+  });
+
+  final bool notificationsGranted;
+  final bool locationGranted;
+}
+
 class AlertItem {
   const AlertItem({
     required this.title,
@@ -133,8 +203,160 @@ class AlertItem {
   final IconData icon;
 }
 
+class LiveHelmetBundle {
+  const LiveHelmetBundle({
+    required this.profile,
+    required this.status,
+    required this.contacts,
+    required this.accidents,
+    required this.notifications,
+  });
+
+  final RiderProfile profile;
+  final Map<String, dynamic> status;
+  final List<Map<String, dynamic>> contacts;
+  final List<Map<String, dynamic>> accidents;
+  final List<AlertItem> notifications;
+}
+
+class SmartHelmetApi {
+  SmartHelmetApi({http.Client? client}) : _client = client ?? http.Client();
+
+  static const String baseUrl = 'https://helzion-server.onrender.com/api';
+  final http.Client _client;
+
+  Future<Map<String, dynamic>> login({required String email, required String password}) async {
+    final response = await _client.post(
+      Uri.parse('$baseUrl/auth/login'),
+      headers: const {'Content-Type': 'application/json'},
+      body: jsonEncode({'email': email, 'password': password}),
+    );
+    return _decodeJson(response);
+  }
+
+  Future<LiveHelmetBundle> loadBundle(String token) async {
+    final results = await Future.wait([
+      _safeGetJson('/user/me', token),
+      _safeGetJson('/user/status', token),
+      _safeGetJson('/user/contacts', token),
+      _safeGetJson('/user/accidents', token),
+      _safeGetJson('/user/notifications', token),
+    ]);
+
+    final profile = results[0] as Map<String, dynamic>? ?? const {};
+    final status = results[1] as Map<String, dynamic>? ?? const {};
+    final contacts = (results[2] as List? ?? const []).cast<Map<String, dynamic>>();
+    final accidents = (results[3] as List? ?? const []).cast<Map<String, dynamic>>();
+    final notifications = (results[4] as List? ?? const [])
+        .map((item) {
+          final map = item as Map<String, dynamic>;
+          return AlertItem(
+            title: map['message']?.toString() ?? '',
+            subtitle: map['channel']?.toString() ?? '',
+            time: _formatTimestamp(map['createdAt']?.toString()),
+            color: _notificationColor(map['status']?.toString()),
+            icon: _notificationIcon(map['channel']?.toString()),
+          );
+        })
+        .toList();
+
+    final statusData = (status['status'] as Map?)?.cast<String, dynamic>() ?? const {};
+    final helmet = (status['helmet'] as Map?)?.cast<String, dynamic>() ?? const {};
+    return LiveHelmetBundle(
+      profile: RiderProfile(
+        name: profile['fullName']?.toString() ?? '',
+        email: profile['email']?.toString() ?? '',
+        phone: profile['phoneNumber']?.toString() ?? '',
+        helmetId: helmet['espId']?.toString() ?? '',
+        language: '',
+        totalRides: 0,
+        kmTravelled: 0,
+        accidents: accidents.length,
+      ),
+      status: {
+        'online': statusData['online'] ?? status['online'],
+        'batteryPercentage': statusData['batteryPercentage'] ?? status['batteryPercentage'],
+        'gpsSignal': statusData['gpsSignal'] ?? status['gpsSignal'],
+        'helmetWorn': statusData['helmetWorn'] ?? status['helmetWorn'],
+        'ridingMode': status['ridingMode'] ?? helmet['ridingModeActive'],
+        'helmet': helmet,
+      },
+      contacts: contacts,
+      accidents: accidents,
+      notifications: notifications,
+    );
+  }
+
+  Future<dynamic> _safeGetJson(String path, String token) async {
+    try {
+      return await getJson(path, token);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<dynamic> getJson(String path, String token) async {
+    final response = await _client.get(
+      Uri.parse('$baseUrl$path'),
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    return _decodeJson(response);
+  }
+
+  dynamic _decodeJson(http.Response response) {
+    final body = response.body.isEmpty ? null : jsonDecode(response.body);
+    if (response.statusCode >= 400) {
+      final message = body is Map && body['message'] != null ? body['message'].toString() : 'Request failed';
+      throw Exception(message);
+    }
+    return body;
+  }
+}
+
+Color _notificationColor(String? status) {
+  switch (status) {
+    case 'sent':
+      return const Color(0xFF23C55E);
+    case 'failed':
+      return const Color(0xFFFF5C5C);
+    default:
+      return const Color(0xFFF6C945);
+  }
+}
+
+IconData _notificationIcon(String? channel) {
+  switch (channel) {
+    case 'whatsapp':
+      return Icons.chat_bubble_outline;
+    case 'email':
+      return Icons.email_outlined;
+    case 'push':
+      return Icons.notifications_none;
+    default:
+      return Icons.sms_outlined;
+  }
+}
+
+String _formatTimestamp(String? timestamp) {
+  if (timestamp == null || timestamp.isEmpty) return '';
+  final parsed = DateTime.tryParse(timestamp);
+  if (parsed == null) return '';
+  return '${parsed.hour.toString().padLeft(2, '0')}:${parsed.minute.toString().padLeft(2, '0')}';
+}
+
 class AppController extends StatefulWidget {
-  const AppController({super.key});
+  const AppController({
+    super.key,
+    required this.initialDarkMode,
+    required this.permissionsPromptSeen,
+    required this.onDarkModeChanged,
+    required this.onPermissionsPromptSeen,
+  });
+
+  final bool initialDarkMode;
+  final bool permissionsPromptSeen;
+  final ValueChanged<bool> onDarkModeChanged;
+  final Future<void> Function() onPermissionsPromptSeen;
 
   @override
   State<AppController> createState() => _AppControllerState();
@@ -142,15 +364,19 @@ class AppController extends StatefulWidget {
 
 class _AppControllerState extends State<AppController> {
   bool _loggedIn = false;
+  bool _loading = false;
+  String _error = '';
   int _currentTab = 0;
+  int _contactCount = 0;
+  bool _showStartupPermissions = false;
   RiderProfile _profile = const RiderProfile(
-    name: 'John Smith',
-    email: 'john.smith@email.com',
-    phone: '+92 300 1234567',
-    helmetId: 'SH-2024-1234',
-    language: 'English (US)',
-    totalRides: 142,
-    kmTravelled: 1254,
+    name: '',
+    email: '',
+    phone: '',
+    helmetId: '',
+    language: '',
+    totalRides: 0,
+    kmTravelled: 0,
     accidents: 0,
   );
   AppSettingsData _settings = const AppSettingsData(
@@ -161,65 +387,94 @@ class _AppControllerState extends State<AppController> {
     accidentSensitivity: 0.7,
     emergencyCountdown: 15,
   );
+  AppPermissionState _permissionState = const AppPermissionState(
+    notificationsGranted: false,
+    locationGranted: false,
+  );
+  List<AlertItem> _alerts = const [];
+  Map<String, dynamic> _status = const {};
+  final SmartHelmetApi _api = SmartHelmetApi();
 
-  final List<AlertItem> _alerts = const [
-    AlertItem(
-      title: 'Emergency Alert Sent Successfully',
-      subtitle: 'Your emergency contacts have been notified',
-      time: '2 min ago',
-      color: Color(0xFF23C55E),
-      icon: Icons.check_circle_outline,
-    ),
-    AlertItem(
-      title: 'Accident Detected',
-      subtitle: 'High impact detected. Emergency alert sent',
-      time: '15 min ago',
-      color: Color(0xFFFF5C5C),
-      icon: Icons.warning_amber_rounded,
-    ),
-    AlertItem(
-      title: 'Low Battery Alert',
-      subtitle: 'Battery is low. Please charge your helmet',
-      time: '1 hour ago',
-      color: Color(0xFFFF8A3D),
-      icon: Icons.battery_1_bar_outlined,
-    ),
-    AlertItem(
-      title: 'Helmet Disconnected',
-      subtitle: 'Bluetooth connection lost with helmet device',
-      time: '2 hours ago',
-      color: Color(0xFFFF5C5C),
-      icon: Icons.portable_wifi_off,
-    ),
-    AlertItem(
-      title: 'GPS Signal Lost',
-      subtitle: 'GPS accuracy is low. Move to open area',
-      time: '3 hours ago',
-      color: Color(0xFFF6C945),
-      icon: Icons.location_on_outlined,
-    ),
-    AlertItem(
-      title: 'Helmet Connected',
-      subtitle: 'Successfully connected to smart helmet',
-      time: '5 hours ago',
-      color: Color(0xFF23C55E),
-      icon: Icons.check_circle_outline,
-    ),
-    AlertItem(
-      title: 'Emergency Contact Added',
-      subtitle: 'New emergency contact has been added successfully',
-      time: '1 day ago',
-      color: Color(0xFF23C55E),
-      icon: Icons.check_circle_outline,
-    ),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _settings = _settings.copyWith(darkMode: widget.initialDarkMode);
+    _showStartupPermissions = !widget.permissionsPromptSeen;
+    _loadSavedSettings();
+    _refreshPermissionState();
+  }
 
-  void _login() => setState(() => _loggedIn = true);
+  Future<void> _loadSavedSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _settings = AppSettingsData(
+        darkMode: prefs.getBool('smartHelmet.darkMode') ?? widget.initialDarkMode,
+        pushNotifications: prefs.getBool('smartHelmet.pushNotifications') ?? true,
+        gpsTracking: prefs.getBool('smartHelmet.gpsTracking') ?? true,
+        autoConnect: prefs.getBool('smartHelmet.autoConnect') ?? true,
+        accidentSensitivity: prefs.getDouble('smartHelmet.accidentSensitivity') ?? 0.7,
+        emergencyCountdown: prefs.getDouble('smartHelmet.emergencyCountdown') ?? 15,
+      );
+    });
+    widget.onDarkModeChanged(_settings.darkMode);
+  }
+
+  Future<void> _refreshPermissionState() async {
+    final notifications = await Permission.notification.status;
+    final location = await Permission.locationWhenInUse.status;
+    if (!mounted) return;
+    setState(() {
+      _permissionState = AppPermissionState(
+        notificationsGranted: notifications.isGranted,
+        locationGranted: location.isGranted,
+      );
+    });
+  }
+
+  Future<void> _login(String email, String password) async {
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+    try {
+      final auth = await _api.login(email: email, password: password);
+      final token = auth['accessToken']?.toString();
+      if (token == null || token.isEmpty) {
+        throw Exception('Login succeeded but no access token was returned.');
+      }
+      final bundle = await _api.loadBundle(token);
+      setState(() {
+        _loggedIn = true;
+        _profile = bundle.profile;
+        _alerts = bundle.notifications;
+        _status = bundle.status;
+        _contactCount = bundle.contacts.length;
+      });
+    } catch (error) {
+      setState(() => _error = error.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      setState(() => _loading = false);
+    }
+  }
 
   void _logout() {
     setState(() {
       _loggedIn = false;
       _currentTab = 0;
+      _alerts = const [];
+      _status = const {};
+      _contactCount = 0;
+      _profile = const RiderProfile(
+        name: '',
+        email: '',
+        phone: '',
+        helmetId: '',
+        language: '',
+        totalRides: 0,
+        kmTravelled: 0,
+        accidents: 0,
+      );
     });
   }
 
@@ -233,12 +488,52 @@ class _AppControllerState extends State<AppController> {
 
   void _updateSettings(AppSettingsData settings) {
     setState(() => _settings = settings);
+    widget.onDarkModeChanged(settings.darkMode);
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setBool('smartHelmet.darkMode', settings.darkMode);
+      prefs.setBool('smartHelmet.pushNotifications', settings.pushNotifications);
+      prefs.setBool('smartHelmet.gpsTracking', settings.gpsTracking);
+      prefs.setBool('smartHelmet.autoConnect', settings.autoConnect);
+      prefs.setDouble('smartHelmet.accidentSensitivity', settings.accidentSensitivity);
+      prefs.setDouble('smartHelmet.emergencyCountdown', settings.emergencyCountdown);
+    });
+  }
+
+  Future<void> _requestNotificationPermission() async {
+    await Permission.notification.request();
+    await _refreshPermissionState();
+  }
+
+  Future<void> _requestLocationPermission() async {
+    await Permission.locationWhenInUse.request();
+    await _refreshPermissionState();
+  }
+
+  Future<void> _openAppSettings() async {
+    await openAppSettings();
+    await _refreshPermissionState();
+  }
+
+  Future<void> _completeStartupPermissions() async {
+    await widget.onPermissionsPromptSeen();
+    if (!mounted) return;
+    setState(() => _showStartupPermissions = false);
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_showStartupPermissions) {
+      return PermissionPromptScreen(
+        permissions: _permissionState,
+        onRequestNotifications: _requestNotificationPermission,
+        onRequestLocation: _requestLocationPermission,
+        onOpenAppSettings: _openAppSettings,
+        onContinue: _completeStartupPermissions,
+      );
+    }
+
     if (!_loggedIn) {
-      return AuthFlow(onLoggedIn: _login);
+      return AuthFlow(onLoggedIn: _login, loading: _loading, errorText: _error);
     }
 
     return MainShell(
@@ -247,18 +542,26 @@ class _AppControllerState extends State<AppController> {
       profile: _profile,
       settings: _settings,
       alerts: _alerts,
+      status: _status,
+      contactCount: _contactCount,
       onProfileChanged: _updateProfile,
       onLanguageChanged: _updateLanguage,
       onSettingsChanged: _updateSettings,
+      onRequestNotificationPermission: _requestNotificationPermission,
+      onRequestLocationPermission: _requestLocationPermission,
+      onOpenAppSettings: _openAppSettings,
+      permissions: _permissionState,
       onLogout: _logout,
     );
   }
 }
 
 class AuthFlow extends StatefulWidget {
-  const AuthFlow({super.key, required this.onLoggedIn});
+  const AuthFlow({super.key, required this.onLoggedIn, required this.loading, required this.errorText});
 
-  final VoidCallback onLoggedIn;
+  final Future<void> Function(String email, String password) onLoggedIn;
+  final bool loading;
+  final String errorText;
 
   @override
   State<AuthFlow> createState() => _AuthFlowState();
@@ -277,12 +580,14 @@ class _AuthFlowState extends State<AuthFlow> {
               ? RegisterWizard(
                   key: const ValueKey('register'),
                   onBackToLogin: () => setState(() => _showRegister = false),
-                  onComplete: widget.onLoggedIn,
+                  onComplete: () => setState(() => _showRegister = false),
                 )
               : LoginScreen(
                   key: const ValueKey('login'),
                   onLogin: widget.onLoggedIn,
                   onRegisterTap: () => setState(() => _showRegister = true),
+                  loading: widget.loading,
+                  errorText: widget.errorText,
                 ),
         ),
       ),
@@ -290,15 +595,101 @@ class _AuthFlowState extends State<AuthFlow> {
   }
 }
 
-class LoginScreen extends StatelessWidget {
+class PermissionPromptScreen extends StatelessWidget {
+  const PermissionPromptScreen({
+    super.key,
+    required this.permissions,
+    required this.onRequestNotifications,
+    required this.onRequestLocation,
+    required this.onOpenAppSettings,
+    required this.onContinue,
+  });
+
+  final AppPermissionState permissions;
+  final Future<void> Function() onRequestNotifications;
+  final Future<void> Function() onRequestLocation;
+  final Future<void> Function() onOpenAppSettings;
+  final Future<void> Function() onContinue;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(18),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const SizedBox(height: 18),
+              const AuthHeader(
+                icon: Icons.security_outlined,
+                title: 'Allow Permissions',
+                subtitle: 'Enable notifications and location for live safety alerts.',
+              ),
+              const SizedBox(height: 20),
+              _PermissionCard(
+                title: 'Notification Permission',
+                subtitle: permissions.notificationsGranted ? 'Already allowed' : 'Required for alerts',
+                icon: Icons.notifications_active_outlined,
+                granted: permissions.notificationsGranted,
+                onRequest: onRequestNotifications,
+                onOpenSettings: onOpenAppSettings,
+              ),
+              const SizedBox(height: 12),
+              _PermissionCard(
+                title: 'Location Permission',
+                subtitle: permissions.locationGranted ? 'Already allowed' : 'Required for live tracking',
+                icon: Icons.location_on_outlined,
+                granted: permissions.locationGranted,
+                onRequest: onRequestLocation,
+                onOpenSettings: onOpenAppSettings,
+              ),
+              const SizedBox(height: 20),
+              AppPrimaryButton(
+                text: 'Continue to App',
+                onPressed: () => onContinue(),
+              ),
+              const SizedBox(height: 12),
+              AppSecondaryButton(
+                text: 'Skip for Now',
+                onPressed: () => onContinue(),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class LoginScreen extends StatefulWidget {
   const LoginScreen({
     super.key,
     required this.onLogin,
     required this.onRegisterTap,
+    required this.loading,
+    required this.errorText,
   });
 
-  final VoidCallback onLogin;
+  final Future<void> Function(String email, String password) onLogin;
   final VoidCallback onRegisterTap;
+  final bool loading;
+  final String errorText;
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final TextEditingController _emailController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -314,26 +705,36 @@ class LoginScreen extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(18, 20, 18, 0),
             child: Column(
               children: [
-                const AppTextField(
+                AppTextField(
                   label: 'Email',
                   hint: 'Enter your email',
                   prefixIcon: Icons.mail_outline,
+                  controller: _emailController,
                 ),
                 const SizedBox(height: 18),
-                const AppTextField(
+                AppTextField(
                   label: 'Password',
                   hint: 'Enter your password',
                   prefixIcon: Icons.lock_outline,
                   suffixIcon: Icons.remove_red_eye_outlined,
                   obscure: true,
+                  controller: _passwordController,
                 ),
                 const SizedBox(height: 16),
-                Row(
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 8,
+                  runSpacing: 4,
                   children: [
-                    const Icon(Icons.check_box_outline_blank, size: 20, color: Color(0xFFD1D5DB)),
-                    const SizedBox(width: 8),
-                    const Text('Remember me', style: TextStyle(fontSize: 14, color: Color(0xFF6B7280))),
-                    const Spacer(),
+                    const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.check_box_outline_blank, size: 20, color: Color(0xFFD1D5DB)),
+                        SizedBox(width: 8),
+                        Text('Remember me', style: TextStyle(fontSize: 14, color: Color(0xFF6B7280))),
+                      ],
+                    ),
                     TextButton(
                       onPressed: () {},
                       child: const Text('Forgot password?'),
@@ -341,7 +742,19 @@ class LoginScreen extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 8),
-                AppPrimaryButton(text: 'Login', onPressed: onLogin),
+                if (widget.errorText.isNotEmpty) ...[
+                  Text(widget.errorText, style: const TextStyle(color: Color(0xFFFF5C5C), fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 12),
+                ],
+                AppPrimaryButton(
+                  text: widget.loading ? 'Signing In...' : 'Login',
+                  onPressed: widget.loading
+                      ? null
+                      : () => widget.onLogin(
+                            _emailController.text.trim(),
+                            _passwordController.text,
+                          ),
+                ),
                 const SizedBox(height: 24),
                 const Row(
                   children: [
@@ -357,18 +770,14 @@ class LoginScreen extends StatelessWidget {
                 Container(
                   height: 54,
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
                     borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                    border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
                   ),
-                  child: const Center(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text('G', style: TextStyle(color: Color(0xFFEA4335), fontWeight: FontWeight.bold, fontSize: 20)),
-                        SizedBox(width: 12),
-                        Text('Login with Google', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                      ],
+                  child: Center(
+                    child: Text(
+                      'Email login only',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Theme.of(context).colorScheme.onSurface),
                     ),
                   ),
                 ),
@@ -378,7 +787,7 @@ class LoginScreen extends StatelessWidget {
                   children: [
                     const Text("Don't have an account? ", style: TextStyle(color: Color(0xFF6B7280))),
                     GestureDetector(
-                      onTap: onRegisterTap,
+                      onTap: widget.onRegisterTap,
                       child: const Text(
                         'Register',
                         style: TextStyle(color: _brandBlue, fontWeight: FontWeight.w700),
@@ -557,7 +966,7 @@ class _RegisterStepCard extends StatelessWidget {
               SizedBox(height: 16),
               AppTextField(label: 'Helmet Name', hint: 'My Helmet', prefixIcon: Icons.health_and_safety_outlined),
               SizedBox(height: 16),
-              AppTextField(label: 'Helmet Model', hint: 'SmartHelmet Pro v2', prefixIcon: Icons.sports_motorsports_outlined),
+                const AppTextField(label: 'Helmet Model', hint: '', prefixIcon: Icons.sports_motorsports_outlined),
             ],
           2 => const [
               AppTextField(label: 'Contact Name', hint: 'John Doe', prefixIcon: Icons.person_outline),
@@ -571,8 +980,8 @@ class _RegisterStepCard extends StatelessWidget {
           _ => [
               _ReviewRow(label: 'Rider', value: 'Ahmed Khan'),
               _ReviewRow(label: 'Email', value: 'ahmed@example.com'),
-              _ReviewRow(label: 'Helmet ID', value: 'ESP-123456789'),
-              _ReviewRow(label: 'Helmet Model', value: 'SmartHelmet Pro v2'),
+                const _ReviewRow(label: 'Helmet ID', value: ''),
+                const _ReviewRow(label: 'Helmet Model', value: ''),
               _ReviewRow(label: 'Emergency Contact', value: 'John Doe (+92 300 1234567)'),
             ],
         },
@@ -616,9 +1025,15 @@ class MainShell extends StatefulWidget {
     required this.profile,
     required this.settings,
     required this.alerts,
+    required this.status,
+    required this.contactCount,
     required this.onProfileChanged,
     required this.onLanguageChanged,
     required this.onSettingsChanged,
+    required this.onRequestNotificationPermission,
+    required this.onRequestLocationPermission,
+    required this.onOpenAppSettings,
+    required this.permissions,
     required this.onLogout,
   });
 
@@ -627,9 +1042,15 @@ class MainShell extends StatefulWidget {
   final RiderProfile profile;
   final AppSettingsData settings;
   final List<AlertItem> alerts;
+  final Map<String, dynamic> status;
+  final int contactCount;
   final ValueChanged<RiderProfile> onProfileChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<AppSettingsData> onSettingsChanged;
+  final Future<void> Function() onRequestNotificationPermission;
+  final Future<void> Function() onRequestLocationPermission;
+  final Future<void> Function() onOpenAppSettings;
+  final AppPermissionState permissions;
   final VoidCallback onLogout;
 
   @override
@@ -640,8 +1061,8 @@ class _MainShellState extends State<MainShell> {
   @override
   Widget build(BuildContext context) {
     final pages = [
-      HomeScreen(onOpenSettings: _openSettings, onOpenSos: _openSos),
-      const LiveTrackingScreen(),
+      HomeScreen(onOpenSettings: _openSettings, onOpenSos: _openSos, profile: widget.profile, alerts: widget.alerts, status: widget.status, contactCount: widget.contactCount),
+      LiveTrackingScreen(status: widget.status),
       AlertsScreen(alerts: widget.alerts),
       ProfileScreen(
         profile: widget.profile,
@@ -658,9 +1079,9 @@ class _MainShellState extends State<MainShell> {
       ),
       bottomNavigationBar: Container(
         height: 90,
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          border: Border(top: BorderSide(color: Theme.of(context).colorScheme.outlineVariant)),
         ),
         child: Row(
           children: [
@@ -680,6 +1101,10 @@ class _MainShellState extends State<MainShell> {
         builder: (_) => SettingsScreen(
           settings: widget.settings,
           onChanged: widget.onSettingsChanged,
+          permissions: widget.permissions,
+          onRequestNotificationPermission: widget.onRequestNotificationPermission,
+          onRequestLocationPermission: widget.onRequestLocationPermission,
+          onOpenAppSettings: widget.onOpenAppSettings,
         ),
       ),
     );
@@ -727,10 +1152,18 @@ class HomeScreen extends StatelessWidget {
     super.key,
     required this.onOpenSettings,
     required this.onOpenSos,
+    required this.profile,
+    required this.alerts,
+    required this.status,
+    required this.contactCount,
   });
 
   final VoidCallback onOpenSettings;
   final VoidCallback onOpenSos;
+  final RiderProfile profile;
+  final List<AlertItem> alerts;
+  final Map<String, dynamic> status;
+  final int contactCount;
 
   @override
   Widget build(BuildContext context) {
@@ -738,15 +1171,15 @@ class HomeScreen extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
       child: Column(
         children: [
-          HomeHero(onOpenSettings: onOpenSettings),
+          HomeHero(onOpenSettings: onOpenSettings, profile: profile, status: status),
           const SizedBox(height: 16),
-          const _FloatingStatusCard(),
+          _FloatingStatusCard(status: status),
           const SizedBox(height: 16),
-          const _InfoGrid(),
+          _InfoGrid(contactsCount: contactCount),
           const SizedBox(height: 16),
-          const _BatteryCard(),
+          _BatteryCard(status: status),
           const SizedBox(height: 16),
-          const _LiveLocationCard(),
+          _LiveLocationCard(status: status),
           const SizedBox(height: 18),
           AppPrimaryButton(
             text: 'Emergency SOS',
@@ -761,14 +1194,16 @@ class HomeScreen extends StatelessWidget {
 }
 
 class HomeHero extends StatelessWidget {
-  const HomeHero({super.key, required this.onOpenSettings});
+  const HomeHero({super.key, required this.onOpenSettings, required this.profile, required this.status});
 
   final VoidCallback onOpenSettings;
+  final RiderProfile profile;
+  final Map<String, dynamic> status;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 178,
+      height: 196,
       width: double.infinity,
       decoration: const BoxDecoration(
         color: _brandBlue,
@@ -810,15 +1245,15 @@ class HomeHero extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    const Expanded(
+                    Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('Hello Rider', style: TextStyle(color: Color(0xFFD9DBFF), fontSize: 12)),
-                          SizedBox(height: 4),
+                          const Text('Hello Rider', style: TextStyle(color: Color(0xFFD9DBFF), fontSize: 12)),
+                          const SizedBox(height: 4),
                           Text(
-                            'Stay Safe Today',
-                            style: TextStyle(color: Colors.white, fontSize: 30, fontWeight: FontWeight.w700),
+                            profile.name.isEmpty ? 'Stay Safe Today' : 'Welcome, ${profile.name.split(' ').first}',
+                            style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w700),
                           ),
                         ],
                       ),
@@ -844,21 +1279,24 @@ class HomeHero extends StatelessWidget {
                     color: Colors.white.withValues(alpha: 0.08),
                     borderRadius: BorderRadius.circular(20),
                   ),
-                  child: const Row(
+                  child: Row(
                     children: [
-                      _MiniHeroIcon(icon: Icons.health_and_safety_outlined),
-                      SizedBox(width: 14),
+                      const _MiniHeroIcon(icon: Icons.health_and_safety_outlined),
+                      const SizedBox(width: 14),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('Helmet Status', style: TextStyle(color: Color(0xFFD9DBFF), fontSize: 12)),
-                            SizedBox(height: 3),
-                            Text('Connected', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700)),
+                            const Text('Helmet Status', style: TextStyle(color: Color(0xFFD9DBFF), fontSize: 12)),
+                            const SizedBox(height: 3),
+                            Text(
+                              status['online'] == null ? '' : (status['online'] == true ? 'Connected' : 'Disconnected'),
+                              style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700),
+                            ),
                           ],
                         ),
                       ),
-                      Icon(Icons.circle, color: Color(0xFF1FE36D), size: 10),
+                      const Icon(Icons.circle, color: Color(0xFF1FE36D), size: 10),
                     ],
                   ),
                 ),
@@ -891,33 +1329,35 @@ class _MiniHeroIcon extends StatelessWidget {
 }
 
 class _FloatingStatusCard extends StatelessWidget {
-  const _FloatingStatusCard();
+  const _FloatingStatusCard({required this.status});
+
+  final Map<String, dynamic> status;
 
   @override
   Widget build(BuildContext context) {
-    return const AppCard(
+    return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Text('Current Status', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-              Spacer(),
-              _StatusChip(text: 'Safe', color: Color(0xFFE7FBEF), textColor: Color(0xFF22C55E)),
+              const Text('Current Status', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              const Spacer(),
+              _StatusChip(text: status['online'] == null ? '' : (status['online'] == true ? 'Safe' : 'Check'), color: const Color(0xFFE7FBEF), textColor: const Color(0xFF22C55E)),
             ],
           ),
-          SizedBox(height: 14),
+          const SizedBox(height: 14),
           Row(
             children: [
-              Icon(Icons.shield_outlined, color: Color(0xFF22C55E), size: 30),
-              SizedBox(width: 12),
+              const Icon(Icons.shield_outlined, color: Color(0xFF22C55E), size: 30),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('All systems operational', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                    SizedBox(height: 2),
-                    Text('No alerts detected', style: TextStyle(color: Color(0xFF6B7280))),
+                    Text(status['online'] == null ? '' : (status['online'] == true ? 'All systems operational' : 'Connection unstable'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: 2),
+                    Text(status['gpsSignal'] == null ? '' : (status['gpsSignal'] == true ? 'GPS signal available' : 'GPS signal unavailable'), style: const TextStyle(color: Color(0xFF6B7280))),
                   ],
                 ),
               ),
@@ -930,7 +1370,9 @@ class _FloatingStatusCard extends StatelessWidget {
 }
 
 class _InfoGrid extends StatelessWidget {
-  const _InfoGrid();
+  const _InfoGrid({required this.contactsCount});
+
+  final int contactsCount;
 
   @override
   Widget build(BuildContext context) {
@@ -941,11 +1383,11 @@ class _InfoGrid extends StatelessWidget {
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       childAspectRatio: 1.35,
-      children: const [
-        _GridInfoCard(icon: Icons.bluetooth_connected, iconColor: Color(0xFF1FE36D), title: 'Bluetooth', value: 'Connected'),
-        _GridInfoCard(icon: Icons.sensors, iconColor: Color(0xFF22C55E), title: 'Helmet Sensor', value: 'Active'),
-        _GridInfoCard(icon: Icons.flash_on_rounded, iconColor: Color(0xFF22C55E), title: 'Shock Sensor', value: 'Normal'),
-        _GridInfoCard(icon: Icons.people_outline, iconColor: Color(0xFF4F8EFF), title: 'Emergency Contact', value: '3 Added'),
+      children: [
+        const _GridInfoCard(icon: Icons.bluetooth_connected, iconColor: Color(0xFF1FE36D), title: 'Bluetooth', value: ''),
+        const _GridInfoCard(icon: Icons.sensors, iconColor: Color(0xFF22C55E), title: 'Helmet Sensor', value: ''),
+        const _GridInfoCard(icon: Icons.flash_on_rounded, iconColor: Color(0xFF22C55E), title: 'Shock Sensor', value: ''),
+        _GridInfoCard(icon: Icons.people_outline, iconColor: const Color(0xFF4F8EFF), title: 'Emergency Contact', value: contactsCount == 0 ? '' : '$contactsCount Added'),
       ],
     );
   }
@@ -990,11 +1432,15 @@ class _GridInfoCard extends StatelessWidget {
 }
 
 class _BatteryCard extends StatelessWidget {
-  const _BatteryCard();
+  const _BatteryCard({required this.status});
+
+  final Map<String, dynamic> status;
 
   @override
   Widget build(BuildContext context) {
-    return const AppCard(
+    final battery = status['batteryPercentage'];
+    final batteryValue = battery is num ? battery.toDouble() / 100.0 : null;
+    return AppCard(
       child: Column(
         children: [
           Row(
@@ -1007,7 +1453,7 @@ class _BatteryCard extends StatelessWidget {
                   children: [
                     Text('Device Battery', style: TextStyle(color: Color(0xFF6B7280))),
                     SizedBox(height: 2),
-                    Text('85%', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+                    Text(battery == null ? '' : '$battery%', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
                   ],
                 ),
               ),
@@ -1016,7 +1462,7 @@ class _BatteryCard extends StatelessWidget {
                 children: [
                   Text('Estimated', style: TextStyle(color: Color(0xFF6B7280))),
                   SizedBox(height: 2),
-                  Text('8h remaining', style: TextStyle(fontWeight: FontWeight.w700)),
+                  Text(battery == null ? '' : 'Live', style: const TextStyle(fontWeight: FontWeight.w700)),
                 ],
               ),
             ],
@@ -1025,7 +1471,7 @@ class _BatteryCard extends StatelessWidget {
           ClipRRect(
             borderRadius: BorderRadius.all(Radius.circular(30)),
             child: LinearProgressIndicator(
-              value: 0.85,
+              value: batteryValue,
               minHeight: 8,
               backgroundColor: Color(0xFFE7EBFF),
               valueColor: AlwaysStoppedAnimation<Color>(_brandBlue),
@@ -1038,11 +1484,13 @@ class _BatteryCard extends StatelessWidget {
 }
 
 class _LiveLocationCard extends StatelessWidget {
-  const _LiveLocationCard();
+  const _LiveLocationCard({required this.status});
+
+  final Map<String, dynamic> status;
 
   @override
   Widget build(BuildContext context) {
-    return const AppCard(
+    return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1059,7 +1507,7 @@ class _LiveLocationCard extends StatelessWidget {
           Row(
             children: [
               Text('GPS Accuracy: ', style: TextStyle(color: Color(0xFF6B7280))),
-              Text('High', style: TextStyle(color: Color(0xFF22C55E), fontWeight: FontWeight.w700)),
+              Text(status['gpsSignal'] == null ? '' : (status['gpsSignal'] == true ? 'High' : ''), style: TextStyle(color: Color(0xFF22C55E), fontWeight: FontWeight.w700)),
             ],
           ),
         ],
@@ -1069,7 +1517,9 @@ class _LiveLocationCard extends StatelessWidget {
 }
 
 class LiveTrackingScreen extends StatelessWidget {
-  const LiveTrackingScreen({super.key});
+  const LiveTrackingScreen({super.key, required this.status});
+
+  final Map<String, dynamic> status;
 
   @override
   Widget build(BuildContext context) {
@@ -1149,26 +1599,26 @@ class LiveTrackingScreen extends StatelessWidget {
                                     child: const Icon(Icons.near_me_outlined, color: Color(0xFF3B82F6), size: 30),
                                   ),
                                   const SizedBox(width: 14),
-                                  const Expanded(
+                                  Expanded(
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
-                                        Text('Current Location', style: TextStyle(color: Color(0xFF6B7280), fontSize: 14)),
+                                        const Text('Current Location', style: TextStyle(color: Color(0xFF6B7280), fontSize: 14)),
                                         SizedBox(height: 4),
-                                        Text('Connaught Place, New Delhi, India', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+                                        Text(status['location']?.toString() ?? '', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
                                         SizedBox(height: 4),
-                                        Text('Lat: 28.6139, Long: 77.2090', style: TextStyle(color: Color(0xFF6B7280))),
+                                        Text(status['coordinates']?.toString() ?? '', style: const TextStyle(color: Color(0xFF6B7280))),
                                       ],
                                     ),
                                   ),
                                 ],
                               ),
                               const SizedBox(height: 20),
-                              const Row(
+                              Row(
                                 children: [
-                                  Expanded(child: _MetricColumn(label: 'Distance', value: '12.5 km')),
-                                  Expanded(child: _MetricColumn(label: 'Duration', value: '18 min')),
-                                  Expanded(child: _MetricColumn(label: 'Accuracy', value: 'High', valueColor: Color(0xFF16A34A))),
+                                  Expanded(child: _MetricColumn(label: 'Distance', value: status['distance']?.toString() ?? '')),
+                                  Expanded(child: _MetricColumn(label: 'Duration', value: status['duration']?.toString() ?? '')),
+                                  Expanded(child: _MetricColumn(label: 'Accuracy', value: status['gpsSignal'] == null ? '' : (status['gpsSignal'] == true ? 'High' : ''), valueColor: const Color(0xFF16A34A))),
                                 ],
                               ),
                               const SizedBox(height: 18),
@@ -1178,14 +1628,14 @@ class LiveTrackingScreen extends StatelessWidget {
                                   color: const Color(0xFFF7F8FC),
                                   borderRadius: BorderRadius.circular(18),
                                 ),
-                                child: const Row(
+                                child: Row(
                                   children: [
-                                    Icon(Icons.access_time_rounded, size: 28, color: Color(0xFF6B7280)),
-                                    SizedBox(width: 12),
+                                    const Icon(Icons.access_time_rounded, size: 28, color: Color(0xFF6B7280)),
+                                    const SizedBox(width: 12),
                                     Expanded(
-                                      child: Text('Estimated Arrival', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+                                      child: Text(status['eta']?.toString() ?? '', style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
                                     ),
-                                    Text('3:45 PM', style: TextStyle(color: _brandBlue, fontSize: 18, fontWeight: FontWeight.w700)),
+                                    Text(status['etaTime']?.toString() ?? '', style: const TextStyle(color: _brandBlue, fontSize: 18, fontWeight: FontWeight.w700)),
                                   ],
                                 ),
                               ),
@@ -1272,40 +1722,29 @@ class AlertsScreen extends StatelessWidget {
           showBack: false,
           child: SizedBox.shrink(),
         ),
-        Container(
-          margin: const EdgeInsets.fromLTRB(16, 14, 16, 0),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color: _brandBlue.withValues(alpha: 0.85),
-            borderRadius: BorderRadius.circular(18),
+        if (alerts.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: _brandBlue.withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.circle, color: Color(0xFFFF5C5C), size: 10),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text('${alerts.length} notifications', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                ),
+              ],
+            ),
           ),
-          child: const Row(
-            children: [
-              Icon(Icons.circle, color: Color(0xFFFF5C5C), size: 10),
-              SizedBox(width: 10),
-              Expanded(
-                child: Text('You have 2 critical alerts', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
-              ),
-              Text('Mark all read', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, decoration: TextDecoration.underline)),
-            ],
-          ),
-        ),
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 30),
-            itemCount: alerts.length + 1,
+            itemCount: alerts.length,
             itemBuilder: (context, index) {
-              if (index == alerts.length) {
-                return const Padding(
-                  padding: EdgeInsets.only(top: 6),
-                  child: Center(
-                    child: Text(
-                      'Load more notifications',
-                      style: TextStyle(color: _brandBlue, fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                );
-              }
               final item = alerts[index];
               return Container(
                 margin: const EdgeInsets.only(bottom: 14),
@@ -1544,7 +1983,7 @@ class ProfileHeader extends StatelessWidget {
                       const SizedBox(height: 14),
                       Text(profile.name, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700)),
                       const SizedBox(height: 4),
-                      const Text('Premium Rider', style: TextStyle(color: Color(0xFFD9DBFF))),
+                      const Text('', style: TextStyle(color: Color(0xFFD9DBFF))),
                     ],
                   ),
                 ),
@@ -1676,10 +2115,18 @@ class SettingsScreen extends StatefulWidget {
     super.key,
     required this.settings,
     required this.onChanged,
+    required this.permissions,
+    required this.onRequestNotificationPermission,
+    required this.onRequestLocationPermission,
+    required this.onOpenAppSettings,
   });
 
   final AppSettingsData settings;
   final ValueChanged<AppSettingsData> onChanged;
+  final AppPermissionState permissions;
+  final Future<void> Function() onRequestNotificationPermission;
+  final Future<void> Function() onRequestLocationPermission;
+  final Future<void> Function() onOpenAppSettings;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -1711,10 +2158,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: Icons.dark_mode_outlined,
                 iconColor: const Color(0xFF60A5FA),
                 value: _settings.darkMode,
-                onChanged: (value) => setState(() => _settings = _settings.copyWith(darkMode: value)),
+                onChanged: (value) {
+                  final nextSettings = _settings.copyWith(darkMode: value);
+                  setState(() => _settings = nextSettings);
+                  widget.onChanged(nextSettings);
+                },
               ),
               const SizedBox(height: 14),
               _settingsSectionLabel('Alerts & Notifications'),
+              _PermissionCard(
+                title: 'Notification Permission',
+                subtitle: widget.permissions.notificationsGranted ? 'Allowed' : 'Not allowed',
+                icon: Icons.notifications_active_outlined,
+                granted: widget.permissions.notificationsGranted,
+                onRequest: widget.onRequestNotificationPermission,
+                onOpenSettings: widget.onOpenAppSettings,
+              ),
+              const SizedBox(height: 12),
               _SwitchCard(
                 title: 'Push Notifications',
                 subtitle: 'Receive alerts and updates',
@@ -1725,6 +2185,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               const SizedBox(height: 14),
               _settingsSectionLabel('Device Settings'),
+              _PermissionCard(
+                title: 'Location Permission',
+                subtitle: widget.permissions.locationGranted ? 'Allowed' : 'Not allowed',
+                icon: Icons.location_on_outlined,
+                granted: widget.permissions.locationGranted,
+                onRequest: widget.onRequestLocationPermission,
+                onOpenSettings: widget.onOpenAppSettings,
+              ),
+              const SizedBox(height: 12),
               _SwitchCard(
                 title: 'GPS Tracking',
                 subtitle: 'Track your location in real-time',
@@ -1817,6 +2286,77 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
+class _PermissionCard extends StatelessWidget {
+  const _PermissionCard({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.granted,
+    required this.onRequest,
+    required this.onOpenSettings,
+  });
+
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final bool granted;
+  final Future<void> Function() onRequest;
+  final Future<void> Function() onOpenSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return AppCard(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 360;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: granted ? const Color(0x1A22C55E) : const Color(0x1AF59E0B),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(icon, color: granted ? const Color(0xFF16A34A) : const Color(0xFFD97706)),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(title, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: scheme.onSurface)),
+                        const SizedBox(height: 4),
+                        Text(subtitle, style: TextStyle(color: scheme.onSurfaceVariant)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.end,
+                children: [
+                  TextButton(onPressed: onRequest, child: const Text('Allow')),
+                  TextButton(onPressed: onOpenSettings, child: const Text('Settings')),
+                ],
+              ),
+              if (compact) const SizedBox(height: 2),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _SwitchCard extends StatelessWidget {
   const _SwitchCard({
     required this.title,
@@ -1894,6 +2434,7 @@ class _SliderCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1914,9 +2455,9 @@ class _SliderCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                    Text(title, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: scheme.onSurface)),
                     const SizedBox(height: 4),
-                    Text(subtitle, style: const TextStyle(color: Color(0xFF6B7280))),
+                    Text(subtitle, style: TextStyle(color: scheme.onSurfaceVariant)),
                   ],
                 ),
               ),
@@ -1930,7 +2471,7 @@ class _SliderCard extends StatelessWidget {
           ),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: labels.map((label) => Text(label, style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 12))).toList(),
+            children: labels.map((label) => Text(label, style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12))).toList(),
           ),
         ],
       ),
@@ -1953,6 +2494,7 @@ class _SettingsLinkCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return AppCard(
       child: Row(
         children: [
@@ -1970,13 +2512,13 @@ class _SettingsLinkCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                Text(title, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: scheme.onSurface)),
                 const SizedBox(height: 4),
-                Text(subtitle, style: const TextStyle(color: Color(0xFF6B7280))),
+                Text(subtitle, style: TextStyle(color: scheme.onSurfaceVariant)),
               ],
             ),
           ),
-          const Icon(Icons.arrow_forward_ios_rounded, size: 16, color: Color(0xFF9CA3AF)),
+          Icon(Icons.arrow_forward_ios_rounded, size: 16, color: scheme.onSurfaceVariant),
         ],
       ),
     );
@@ -2238,7 +2780,7 @@ class SosAlertScreen extends StatelessWidget {
               const SizedBox(height: 18),
               const _SosInfoCard(icon: Icons.location_on_outlined, title: 'Your Location', subtitle: 'Lat: 28.6139, Long: 77.2090'),
               const SizedBox(height: 12),
-              const _SosInfoCard(icon: Icons.people_outline, title: 'Emergency Contacts', subtitle: '3 contacts will be notified'),
+              const _SosInfoCard(icon: Icons.people_outline, title: 'Emergency Contacts', subtitle: ''),
               const SizedBox(height: 12),
               const _SosInfoCard(icon: Icons.local_hospital_outlined, title: 'Emergency Services', subtitle: 'Nearby hospitals will be notified'),
             ],
@@ -2301,13 +2843,15 @@ class AppCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
       padding: padding,
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: scheme.surface,
         borderRadius: BorderRadius.circular(borderRadius),
         boxShadow: const [_cardShadow],
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.45)),
       ),
       child: child,
     );
@@ -2334,15 +2878,16 @@ class AppTextField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF4B5563))),
+        Text(label, style: TextStyle(fontWeight: FontWeight.w700, color: scheme.onSurface)),
         const SizedBox(height: 8),
         Container(
           height: 58,
           decoration: BoxDecoration(
-            color: const Color(0xFFF3F5FA),
+            color: scheme.surfaceContainerHighest,
             borderRadius: BorderRadius.circular(18),
           ),
           child: TextField(
@@ -2351,9 +2896,9 @@ class AppTextField extends StatelessWidget {
             decoration: InputDecoration(
               border: InputBorder.none,
               hintText: hint,
-              hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
-              prefixIcon: prefixIcon != null ? Icon(prefixIcon, color: const Color(0xFFB6BCC8)) : null,
-              suffixIcon: suffixIcon != null ? Icon(suffixIcon, color: const Color(0xFFB6BCC8)) : null,
+              hintStyle: TextStyle(color: scheme.onSurfaceVariant),
+              prefixIcon: prefixIcon != null ? Icon(prefixIcon, color: scheme.onSurfaceVariant) : null,
+              suffixIcon: suffixIcon != null ? Icon(suffixIcon, color: scheme.onSurfaceVariant) : null,
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
             ),
           ),
@@ -2417,15 +2962,16 @@ class AppSecondaryButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return SizedBox(
       height: 58,
       child: OutlinedButton(
         onPressed: onPressed,
         style: OutlinedButton.styleFrom(
-          side: const BorderSide(color: Color(0xFFD6DAE3)),
+          side: BorderSide(color: scheme.outlineVariant),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         ),
-        child: Text(text, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Color(0xFF4B5563))),
+        child: Text(text, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: scheme.onSurface)),
       ),
     );
   }
@@ -2493,7 +3039,10 @@ class AuthHeader extends StatelessWidget {
                     color: Colors.white.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(26),
                   ),
-                  child: Icon(icon, color: Colors.white, size: 46),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Image.asset('assets/images/logo.png', fit: BoxFit.cover),
+                  ),
                 ),
                 const SizedBox(height: 22),
                 Text(title, style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.w700)),
