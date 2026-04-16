@@ -27,7 +27,6 @@ class SmartHelmetApp extends StatefulWidget {
 class _SmartHelmetAppState extends State<SmartHelmetApp> {
   bool _darkMode = false;
   bool _loading = true;
-  bool _startupPermissionsPromptSeen = false;
 
   @override
   void initState() {
@@ -40,7 +39,6 @@ class _SmartHelmetAppState extends State<SmartHelmetApp> {
     if (!mounted) return;
     setState(() {
       _darkMode = prefs.getBool('smartHelmet.darkMode') ?? false;
-      _startupPermissionsPromptSeen = prefs.getBool('smartHelmet.permissionsPromptSeen') ?? false;
       _loading = false;
     });
   }
@@ -49,12 +47,6 @@ class _SmartHelmetAppState extends State<SmartHelmetApp> {
     setState(() => _darkMode = enabled);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('smartHelmet.darkMode', enabled);
-  }
-
-  Future<void> _setPermissionsPromptSeen() async {
-    setState(() => _startupPermissionsPromptSeen = true);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('smartHelmet.permissionsPromptSeen', true);
   }
 
   @override
@@ -89,9 +81,7 @@ class _SmartHelmetAppState extends State<SmartHelmetApp> {
           ? const Scaffold(body: Center(child: CircularProgressIndicator()))
           : AppController(
               initialDarkMode: _darkMode,
-              permissionsPromptSeen: _startupPermissionsPromptSeen,
               onDarkModeChanged: _setDarkMode,
-              onPermissionsPromptSeen: _setPermissionsPromptSeen,
             ),
     );
   }
@@ -348,15 +338,11 @@ class AppController extends StatefulWidget {
   const AppController({
     super.key,
     required this.initialDarkMode,
-    required this.permissionsPromptSeen,
     required this.onDarkModeChanged,
-    required this.onPermissionsPromptSeen,
   });
 
   final bool initialDarkMode;
-  final bool permissionsPromptSeen;
   final ValueChanged<bool> onDarkModeChanged;
-  final Future<void> Function() onPermissionsPromptSeen;
 
   @override
   State<AppController> createState() => _AppControllerState();
@@ -368,7 +354,6 @@ class _AppControllerState extends State<AppController> {
   String _error = '';
   int _currentTab = 0;
   int _contactCount = 0;
-  bool _showStartupPermissions = false;
   RiderProfile _profile = const RiderProfile(
     name: '',
     email: '',
@@ -399,7 +384,6 @@ class _AppControllerState extends State<AppController> {
   void initState() {
     super.initState();
     _settings = _settings.copyWith(darkMode: widget.initialDarkMode);
-    _showStartupPermissions = !widget.permissionsPromptSeen;
     _loadSavedSettings();
     _refreshPermissionState();
   }
@@ -514,24 +498,8 @@ class _AppControllerState extends State<AppController> {
     await _refreshPermissionState();
   }
 
-  Future<void> _completeStartupPermissions() async {
-    await widget.onPermissionsPromptSeen();
-    if (!mounted) return;
-    setState(() => _showStartupPermissions = false);
-  }
-
   @override
   Widget build(BuildContext context) {
-    if (_showStartupPermissions) {
-      return PermissionPromptScreen(
-        permissions: _permissionState,
-        onRequestNotifications: _requestNotificationPermission,
-        onRequestLocation: _requestLocationPermission,
-        onOpenAppSettings: _openAppSettings,
-        onContinue: _completeStartupPermissions,
-      );
-    }
-
     if (!_loggedIn) {
       return AuthFlow(onLoggedIn: _login, loading: _loading, errorText: _error);
     }
@@ -589,73 +557,6 @@ class _AuthFlowState extends State<AuthFlow> {
                   loading: widget.loading,
                   errorText: widget.errorText,
                 ),
-        ),
-      ),
-    );
-  }
-}
-
-class PermissionPromptScreen extends StatelessWidget {
-  const PermissionPromptScreen({
-    super.key,
-    required this.permissions,
-    required this.onRequestNotifications,
-    required this.onRequestLocation,
-    required this.onOpenAppSettings,
-    required this.onContinue,
-  });
-
-  final AppPermissionState permissions;
-  final Future<void> Function() onRequestNotifications;
-  final Future<void> Function() onRequestLocation;
-  final Future<void> Function() onOpenAppSettings;
-  final Future<void> Function() onContinue;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const SizedBox(height: 18),
-              const AuthHeader(
-                icon: Icons.security_outlined,
-                title: 'Allow Permissions',
-                subtitle: 'Enable notifications and location for live safety alerts.',
-              ),
-              const SizedBox(height: 20),
-              _PermissionCard(
-                title: 'Notification Permission',
-                subtitle: permissions.notificationsGranted ? 'Already allowed' : 'Required for alerts',
-                icon: Icons.notifications_active_outlined,
-                granted: permissions.notificationsGranted,
-                onRequest: onRequestNotifications,
-                onOpenSettings: onOpenAppSettings,
-              ),
-              const SizedBox(height: 12),
-              _PermissionCard(
-                title: 'Location Permission',
-                subtitle: permissions.locationGranted ? 'Already allowed' : 'Required for live tracking',
-                icon: Icons.location_on_outlined,
-                granted: permissions.locationGranted,
-                onRequest: onRequestLocation,
-                onOpenSettings: onOpenAppSettings,
-              ),
-              const SizedBox(height: 20),
-              AppPrimaryButton(
-                text: 'Continue to App',
-                onPressed: () => onContinue(),
-              ),
-              const SizedBox(height: 12),
-              AppSecondaryButton(
-                text: 'Skip for Now',
-                onPressed: () => onContinue(),
-              ),
-            ],
-          ),
         ),
       ),
     );
@@ -2181,7 +2082,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: Icons.notifications_none,
                 iconColor: const Color(0xFF60A5FA),
                 value: _settings.pushNotifications,
-                onChanged: (value) => setState(() => _settings = _settings.copyWith(pushNotifications: value)),
+                onChanged: (value) async {
+                  if (value) {
+                    await widget.onRequestNotificationPermission();
+                  }
+                  final granted = (await Permission.notification.status).isGranted;
+                  if (!mounted) return;
+                  setState(() => _settings = _settings.copyWith(pushNotifications: value && granted));
+                },
               ),
               const SizedBox(height: 14),
               _settingsSectionLabel('Device Settings'),
@@ -2200,7 +2108,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: Icons.location_on_outlined,
                 iconColor: const Color(0xFF60A5FA),
                 value: _settings.gpsTracking,
-                onChanged: (value) => setState(() => _settings = _settings.copyWith(gpsTracking: value)),
+                onChanged: (value) async {
+                  if (value) {
+                    await widget.onRequestLocationPermission();
+                  }
+                  final granted = (await Permission.locationWhenInUse.status).isGranted;
+                  if (!mounted) return;
+                  setState(() => _settings = _settings.copyWith(gpsTracking: value && granted));
+                },
               ),
               const SizedBox(height: 12),
               _SwitchCard(
